@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Training artifacts
+logs/
+models/
+*.log
+nohup.out
+
+# Data
+data/datasets/*.json.gz
+*.glb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

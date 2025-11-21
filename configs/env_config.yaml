@@ -1,0 +1,97 @@
+# Habitat RL Color Sorting Environment Configuration
+
+# Simulation Settings
+sim:
+  scene_dataset_path: "~/habitat_data/scene_datasets/hssd-hab/hssd-hab.scene_dataset_config.json"
+  scene_id: "103997919_171031233"  # Simple room scene
+  physics_timestep: 0.01
+  enable_physics: true
+  headless: true
+  gpu_device_id: 0
+
+# Robot Configuration
+robot:
+  type: "fetch"  # "fetch" or "franka"
+  urdf_path: "~/habitat_data/robots/hab_fetch/robots/hab_fetch.urdf"
+  base_position: [0.0, 0.0, 0.0]
+  base_orientation: [0.0, 0.0, 0.0, 1.0]  # quaternion
+  fixed_base: true
+  num_joints: 7
+  gripper_joint_idx: 7
+  
+# Objects Configuration
+objects:
+  num_objects: 3
+  spawn_area:
+    x_range: [-0.3, 0.3]
+    y_range: [0.8, 1.0]  # table height
+    z_range: [-0.2, 0.2]
+  object_types:
+    - name: "red_cube"
+      path: "~/habitat_data/objects/ycb/003_cracker_box/003_cracker_box.glb"
+      color: [255, 0, 0]  # RGB
+      color_id: 0
+      scale: 0.5
+    - name: "green_cube"
+      path: "~/habitat_data/objects/ycb/004_sugar_box/004_sugar_box.glb"
+      color: [0, 255, 0]
+      color_id: 1
+      scale: 0.5
+    - name: "blue_cube"
+      path: "~/habitat_data/objects/ycb/005_tomato_soup_can/005_tomato_soup_can.glb"
+      color: [0, 0, 255]
+      color_id: 2
+      scale: 0.5
+
+# Target Zones Configuration
+zones:
+  red_zone:
+    position: [-0.5, 0.8, 0.0]
+    radius: 0.1
+    color_id: 0
+  green_zone:
+    position: [0.0, 0.8, 0.0]
+    radius: 0.1
+    color_id: 1
+  blue_zone:
+    position: [0.5, 0.8, 0.0]
+    radius: 0.1
+    color_id: 2
+
+# Camera/Sensor Configuration
+sensors:
+  rgb_camera:
+    resolution: [480, 640]  # height, width
+    position: [0.0, 1.5, 0.5]  # mount on robot or fixed
+    orientation: [0.0, 0.0, 0.0, 1.0]
+    hfov: 90
+    sensor_type: "color"
+  depth_camera:
+    enabled: false
+    resolution: [480, 640]
+
+# RL Environment Settings
+env:
+  max_episode_steps: 500
+  success_distance_threshold: 0.1  # meters
+  control_frequency: 10  # Hz
+  frame_skip: 4
+
+# Reward Shaping
+rewards:
+  object_in_correct_zone: 100.0
+  object_stays_in_zone: 10.0
+  distance_penalty_weight: -0.5
+  step_penalty: -0.01
+  wrong_zone_penalty: -10.0
+  collision_penalty: -10.0
+
+# Logging
+logging:
+  log_dir: "~/habitat_rl_sorting/logs"
+  save_episodes: true
+  save_rgb_frames: true
+  save_frequency: 100  # episodes
+
+# Reproducibility
+seed: 42
