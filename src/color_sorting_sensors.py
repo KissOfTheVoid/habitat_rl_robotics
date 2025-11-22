@@ -1,8 +1,9 @@
 """
 Custom sensors and measurements for Color Sorting Task
+Includes both sparse and dense reward implementations
 """
 import numpy as np
-from typing import Any
+from typing import Any, Dict, Optional
 
 from habitat.core.embodied_task import Measure
 from habitat.core.registry import registry
@@ -11,6 +12,7 @@ from habitat.core.simulator import Sensor, SensorTypes, Simulator
 
 @registry.register_sensor
 class ColorZoneSensor(Sensor):
+    """Sensor providing zone positions and color IDs."""
     cls_uuid: str = "color_zone_sensor"
     
     def __init__(self, sim: Simulator, config, *args, **kwargs):
@@ -29,15 +31,16 @@ class ColorZoneSensor(Sensor):
     
     def get_observation(self, observations, episode, *args, **kwargs):
         zone_data = [
-            [-0.5, 0.8, 0.0, 0],
-            [0.0, 0.8, 0.0, 1],
-            [0.5, 0.8, 0.0, 2]
+            [-0.5, 0.8, 0.0, 0],  # Red zone
+            [0.0, 0.8, 0.0, 1],   # Green zone
+            [0.5, 0.8, 0.0, 2]    # Blue zone
         ]
         return np.array(zone_data, dtype=np.float32)
 
 
 @registry.register_sensor
 class ObjectColorSensor(Sensor):
+    """Sensor providing object positions and color IDs."""
     cls_uuid: str = "object_color_sensor"
     
     def __init__(self, sim: Simulator, config, *args, **kwargs):
@@ -78,6 +81,7 @@ class ObjectColorSensor(Sensor):
 
 @registry.register_measure
 class ColorSortingSuccess(Measure):
+    """Measure tracking task success (all objects in correct zones)."""
     cls_uuid: str = "color_sorting_success"
     
     def __init__(self, sim, config, *args, **kwargs):
@@ -93,7 +97,7 @@ class ColorSortingSuccess(Measure):
         self._metric = 0
     
     def update_metric(self, episode, task, *args, **kwargs):
-        if hasattr(task, '_objects_correctly_placed'):
+        if hasattr(task, "_objects_correctly_placed"):
             placements = task._objects_correctly_placed
             self._metric = 1 if (placements and all(placements.values())) else 0
         else:
@@ -102,6 +106,10 @@ class ColorSortingSuccess(Measure):
 
 @registry.register_measure
 class ColorSortingReward(Measure):
+    """
+    Original sparse reward (kept for backwards compatibility).
+    Only gives reward when object is placed in correct zone.
+    """
     cls_uuid: str = "color_sorting_reward"
     
     def __init__(self, sim, config, *args, **kwargs):
@@ -119,22 +127,230 @@ class ColorSortingReward(Measure):
         self._metric = 0
     
     def update_metric(self, episode, task, *args, **kwargs):
-        reward = -0.01
-        if not hasattr(task, '_objects_correctly_placed'):
+        reward = -0.01  # Time penalty
+        if not hasattr(task, "_objects_correctly_placed"):
             self._metric = reward
             return
         placements = task._objects_correctly_placed
         for obj_handle, is_correct in placements.items():
             if is_correct:
                 if obj_handle not in self._prev_objects_placed:
-                    reward += 100.0
+                    reward += 100.0  # First-time placement bonus
                     self._prev_objects_placed.add(obj_handle)
-                reward += 10.0
+                reward += 10.0  # Holding bonus
+        self._metric = reward
+
+
+@registry.register_measure
+class ColorSortingDenseReward(Measure):
+    """
+    Dense reward for Color Sorting Task.
+    
+    Multi-phase reward structure:
+    1. APPROACH: Reward for moving end-effector towards nearest unplaced object
+    2. PICK: Bonus for successfully grasping an object
+    3. TRANSPORT: Reward for moving held object towards its target zone
+    4. PLACE: Large bonus for correct placement
+    5. COMPLETION: Extra bonus when all objects are sorted
+    
+    Based on Habitat-Lab RearrangePickReward and PlaceReward patterns.
+    """
+    cls_uuid: str = "color_sorting_dense_reward"
+    
+    def __init__(self, sim, config, *args, **kwargs):
+        self._sim = sim
+        self._config = config
+        super().__init__()
+        
+        # Reward coefficients (can be overridden in config)
+        self._dist_reward_scale = config.get("dist_reward_scale", 1.0)
+        self._pick_reward = config.get("pick_reward", 10.0)
+        self._place_reward = config.get("place_reward", 50.0)
+        self._drop_penalty = config.get("drop_penalty", -5.0)
+        self._wrong_zone_penalty = config.get("wrong_zone_penalty", -10.0)
+        self._time_penalty = config.get("time_penalty", -0.001)
+        self._completion_bonus = config.get("completion_bonus", 100.0)
+        self._success_distance = config.get("success_distance", 0.1)
+        
+        # State tracking
+        self._prev_dist_to_target = None
+        self._prev_holding = False
+        self._objects_placed = set()
+        self._prev_ee_to_obj_dist = None
+    
+    @staticmethod
+    def _get_uuid(*args, **kwargs):
+        return ColorSortingDenseReward.cls_uuid
+    
+    def reset_metric(self, episode, task, *args, **kwargs):
+        self._prev_dist_to_target = None
+        self._prev_holding = False
+        self._objects_placed = set()
+        self._prev_ee_to_obj_dist = None
+        self._metric = 0
+    
+    def _get_ee_position(self, task) -> Optional[np.ndarray]:
+        """Get end-effector position from articulated agent."""
+        try:
+            # Access the articulated agent (Fetch robot)
+            agent = self._sim.articulated_agent
+            if agent is None:
+                return None
+            # Get end-effector transformation
+            ee_transform = agent.ee_transform()
+            return np.array(ee_transform.translation)
+        except Exception:
+            return None
+    
+    def _get_objects_data(self) -> list:
+        """Get list of (handle, position, color_id) for all objects."""
+        objects = []
+        try:
+            rigid_obj_mgr = self._sim.get_rigid_object_manager()
+            for obj_handle in rigid_obj_mgr.get_object_handles():
+                if "object_" not in obj_handle:
+                    continue
+                obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
+                pos = np.array(obj.translation)
+                try:
+                    obj_idx = int(obj_handle.split("_")[-1])
+                    color_id = obj_idx % 3
+                except:
+                    color_id = 0
+                objects.append((obj_handle, pos, color_id))
+        except Exception:
+            pass
+        return objects
+    
+    def _get_zone_position(self, color_id: int) -> np.ndarray:
+        """Get zone position for given color ID."""
+        zones = {
+            0: np.array([-0.5, 0.8, 0.0]),  # Red
+            1: np.array([0.0, 0.8, 0.0]),   # Green
+            2: np.array([0.5, 0.8, 0.0]),   # Blue
+        }
+        return zones.get(color_id, np.array([0.0, 0.8, 0.0]))
+    
+    def _is_holding_object(self, task) -> bool:
+        """Check if robot is currently holding an object."""
+        try:
+            agent = self._sim.articulated_agent
+            if agent is None:
+                return False
+            # Check gripper state
+            return agent.is_grasped
+        except Exception:
+            return False
+    
+    def _get_held_object(self, task) -> Optional[tuple]:
+        """Get the currently held object (handle, color_id) if any."""
+        try:
+            agent = self._sim.articulated_agent
+            if agent is None or not agent.is_grasped:
+                return None
+            # Get grasped object
+            grasped_obj_id = agent.grasped_objects_idxs
+            if grasped_obj_id is None or len(grasped_obj_id) == 0:
+                return None
+            # Find object handle
+            rigid_obj_mgr = self._sim.get_rigid_object_manager()
+            for obj_handle in rigid_obj_mgr.get_object_handles():
+                if "object_" in obj_handle:
+                    obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
+                    if obj.object_id in grasped_obj_id:
+                        try:
+                            obj_idx = int(obj_handle.split("_")[-1])
+                            color_id = obj_idx % 3
+                        except:
+                            color_id = 0
+                        return (obj_handle, color_id)
+        except Exception:
+            pass
+        return None
+    
+    def update_metric(self, episode, task, *args, **kwargs):
+        reward = self._time_penalty  # Small time penalty
+        
+        ee_pos = self._get_ee_position(task)
+        objects = self._get_objects_data()
+        is_holding = self._is_holding_object(task)
+        held_obj = self._get_held_object(task)
+        
+        # Get placement status from task
+        placements = {}
+        if hasattr(task, "_objects_correctly_placed"):
+            placements = task._objects_correctly_placed
+        
+        # === PHASE 1: APPROACH (when not holding) ===
+        if not is_holding and ee_pos is not None:
+            # Find nearest unplaced object
+            min_dist = float("inf")
+            for obj_handle, obj_pos, color_id in objects:
+                if obj_handle in self._objects_placed:
+                    continue
+                dist = np.linalg.norm(ee_pos - obj_pos)
+                if dist < min_dist:
+                    min_dist = dist
+            
+            if min_dist < float("inf"):
+                # Reward for getting closer to object
+                if self._prev_ee_to_obj_dist is not None:
+                    dist_diff = self._prev_ee_to_obj_dist - min_dist
+                    reward += dist_diff * self._dist_reward_scale
+                self._prev_ee_to_obj_dist = min_dist
+        
+        # === PHASE 2: PICK (transition from not holding to holding) ===
+        if is_holding and not self._prev_holding:
+            reward += self._pick_reward
+            self._prev_ee_to_obj_dist = None  # Reset approach tracking
+        
+        # === PHASE 3: TRANSPORT (when holding) ===
+        if is_holding and held_obj is not None:
+            obj_handle, color_id = held_obj
+            target_zone = self._get_zone_position(color_id)
+            
+            # Use EE position as proxy for object position when held
+            if ee_pos is not None:
+                dist_to_zone = np.linalg.norm(ee_pos - target_zone)
+                
+                if self._prev_dist_to_target is not None:
+                    dist_diff = self._prev_dist_to_target - dist_to_zone
+                    reward += dist_diff * self._dist_reward_scale
+                
+                self._prev_dist_to_target = dist_to_zone
+        
+        # === PHASE 4: PLACE (object in correct zone) ===
+        for obj_handle, is_correct in placements.items():
+            if is_correct and obj_handle not in self._objects_placed:
+                reward += self._place_reward
+                self._objects_placed.add(obj_handle)
+                self._prev_dist_to_target = None  # Reset transport tracking
+        
+        # === PHASE 5: DROP PENALTY (dropped without placing) ===
+        if self._prev_holding and not is_holding:
+            if held_obj is None:
+                # Check if we just placed correctly
+                just_placed = False
+                for obj_handle in self._objects_placed:
+                    if obj_handle not in self._objects_placed:
+                        just_placed = True
+                        break
+                if not just_placed:
+                    reward += self._drop_penalty
+        
+        # === PHASE 6: COMPLETION BONUS ===
+        if placements and all(placements.values()):
+            if len(self._objects_placed) == len(placements):
+                reward += self._completion_bonus
+        
+        # Update state for next step
+        self._prev_holding = is_holding
         self._metric = reward
 
 
 @registry.register_measure
 class NumObjectsCorrectlyPlaced(Measure):
+    """Measure tracking number of correctly placed objects."""
     cls_uuid: str = "num_objects_correctly_placed"
     
     def __init__(self, sim, config, *args, **kwargs):
@@ -150,7 +366,7 @@ class NumObjectsCorrectlyPlaced(Measure):
         self._metric = 0
     
     def update_metric(self, episode, task, *args, **kwargs):
-        if hasattr(task, '_objects_correctly_placed'):
+        if hasattr(task, "_objects_correctly_placed"):
             placements = task._objects_correctly_placed
             self._metric = sum(placements.values()) if placements else 0
         else:

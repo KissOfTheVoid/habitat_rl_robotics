@@ -34,16 +34,20 @@ habitat:
   
   task:
     type: ColorSortingTask-v0
-    reward_measure: "color_sorting_reward"
+    # Using dense reward for better learning signal
+    reward_measure: "color_sorting_dense_reward"
     success_measure: "color_sorting_success"
     success_reward: 100.0
-    slack_reward: -0.01
+    slack_reward: -0.001
     end_on_success: False
     
     # Measurements
     measurements:
       color_sorting_reward:
         type: ColorSortingReward
+      
+      color_sorting_dense_reward:
+        type: ColorSortingDenseReward
       
       color_sorting_success:
         type: ColorSortingSuccess
@@ -55,7 +59,7 @@ habitat:
         max_accum_force: 10000.0
         max_instant_force: 10000.0
     
-    # Lab sensors - добавляем напрямую в конфиг
+    # Lab sensors
     lab_sensors:
       object_color_sensor:
         type: ObjectColorSensor
@@ -73,7 +77,6 @@ habitat:
     requires_textures: True
     auto_sleep: False
     
-    # КРИТИЧЕСКИ ВАЖНО: переопределяем путь к URDF робота на абсолютный
     agents:
       main_agent:
         articulated_agent_urdf: /home/iskopyl/habitat_data/robots/hab_fetch/robots/hab_suction.urdf
