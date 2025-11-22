@@ -24,26 +24,11 @@ class ColorSortingGymEnv(gym.Env):
     """
     Gymnasium wrapper for Habitat Color Sorting Task.
     
-    Provides standard Gymnasium interface:
-    - reset() -> observation, info
-    - step(action) -> observation, reward, terminated, truncated, info
-    - render() -> rgb_array
-    - close()
+    Simplified action space (no base movement):
+    - arm_action: 7D joint control
+    - grip_action: 1D gripper control
     
-    Observation Space:
-        Dict with keys:
-        - 'rgb': Box(0, 255, (H, W, 3), uint8) - Raw RGB camera feed
-        - 'state': Box(-inf, inf, (N,), float32) - Robot state (joints, positions, etc.)
-    
-    Action Space:
-        Box(-1, 1, (M,), float32) - Continuous control of robot joints + gripper
-    
-    Reward:
-        Float value based on task performance (see ColorSortingReward measure)
-    
-    Episode Termination:
-        - terminated: All objects successfully sorted
-        - truncated: Max episode steps reached
+    Total: 8D continuous action space
     """
     
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
@@ -55,24 +40,13 @@ class ColorSortingGymEnv(gym.Env):
         max_episode_steps: int = 500,
         override_options: Optional[list] = None,
     ):
-        """
-        Initialize Gymnasium wrapper.
-        
-        Args:
-            config_path: Path to Habitat config YAML file
-            render_mode: Rendering mode ('rgb_array' for headless)
-            max_episode_steps: Maximum steps per episode
-            override_options: List of config overrides
-        """
         super().__init__()
         
         self.render_mode = render_mode
         self.max_episode_steps = max_episode_steps
         
-        
         # Load Habitat config
         self.habitat_config = get_config(config_path, overrides=override_options or [])
-        
         
         # Create Habitat environment
         self._env = HabitatEnv(config=self.habitat_config)
@@ -80,7 +54,7 @@ class ColorSortingGymEnv(gym.Env):
         # Define observation space
         self.observation_space = self._create_observation_space()
         
-        # Define action space
+        # Define action space - 8D (no base)
         self.action_space = self._create_action_space()
         
         # Episode tracking
@@ -88,37 +62,30 @@ class ColorSortingGymEnv(gym.Env):
         self._episode_reward = 0.0
         
     def _create_observation_space(self) -> gym.Space:
-        """
-        Create Gymnasium observation space from Habitat observations.
-        """
-        # Get sample observation to determine shapes
+        """Create Gymnasium observation space from Habitat observations."""
         obs = self._env.reset()
         
         spaces_dict = {}
         
-        # RGB camera (raw, no preprocessing)
+        # RGB camera
         if "head_rgb" in obs:
             rgb_shape = obs["head_rgb"].shape
             spaces_dict["rgb"] = gym.spaces.Box(
                 low=0, high=255, shape=rgb_shape, dtype=np.uint8
             )
         
-        # State vector (joints, object positions, zone positions, etc.)
+        # State vector
         state_components = []
         
-        # Joint positions
         if "joint" in obs:
             state_components.append(obs["joint"].flatten())
         
-        # Gripper state
         if "is_holding" in obs:
             state_components.append(obs["is_holding"].flatten())
         
-        # Object positions and color IDs
         if "object_color_sensor" in obs:
             state_components.append(obs["object_color_sensor"].flatten())
         
-        # Zone positions and color IDs
         if "color_zone_sensor" in obs:
             state_components.append(obs["color_zone_sensor"].flatten())
         
@@ -132,41 +99,36 @@ class ColorSortingGymEnv(gym.Env):
     
     def _create_action_space(self) -> gym.Space:
         """
-        Create flattened Box action space for SB3 compatibility.
+        Create 8D action space (no base movement).
         
-        Original Habitat action: Dict of Dicts
-        Flattened: Box(10,) = [arm(7) + grip(1) + base(2)]
+        [0-6]: arm_action (7 DOF)
+        [7]: grip_action (1D)
         """
-        # Flatten: arm_action(7) + grip_action(1) + base_vel(2) = 10D
         return gym.spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(10,),
+            shape=(8,),
             dtype=np.float32
         )
     
     def _flatten_action(self, action: np.ndarray) -> Dict:
-        """Convert flattened action to Habitat format with proper structure."""
-        # action is (10,) array: [arm(7), grip(1), base(2)]
+        """Convert 8D action to Habitat format (no base)."""
         return {
-            "action": ("arm_action", "base_velocity"),  # Multiple actions
+            "action": ("arm_action",),  # Only arm action
             "action_args": {
                 "arm_action": action[:7].astype(np.float32),
                 "grip_action": action[7:8].astype(np.float32),
-                "base_vel": action[8:10].astype(np.float32) * 20.0  # Scale to [-20, 20]
+                # No base_vel - robot stays stationary
             }
         }
+    
     def _process_observation(self, habitat_obs: Dict) -> Dict[str, np.ndarray]:
-        """
-        Convert Habitat observation to Gymnasium observation.
-        """
+        """Convert Habitat observation to Gymnasium observation."""
         obs = {}
         
-        # RGB camera
         if "head_rgb" in habitat_obs:
             obs["rgb"] = habitat_obs["head_rgb"].astype(np.uint8)
         
-        # State vector
         state_components = []
         
         if "joint" in habitat_obs:
@@ -186,47 +148,17 @@ class ColorSortingGymEnv(gym.Env):
         
         return obs
     
-    def _process_action(self, action: np.ndarray) -> Dict:
-        """
-        Convert Gymnasium action to Habitat action format.
-        """
-        # If action space is Dict, need to unpack
-        habitat_action_space = self._env.action_space
-        
-        if isinstance(habitat_action_space, gym.spaces.Dict):
-            # Unpack flattened action
-            action_dict = {}
-            offset = 0
-            
-            for key in sorted(habitat_action_space.spaces.keys()):
-                space = habitat_action_space.spaces[key]
-                if isinstance(space, gym.spaces.Box):
-                    dims = int(np.prod(space.shape))
-                    action_dict[key] = action[offset:offset+dims].reshape(space.shape)
-                    offset += dims
-            
-            return action_dict
-        else:
-            return action
-    
     def reset(
         self, 
         seed: Optional[int] = None, 
         options: Optional[Dict] = None
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-        """
-        Reset environment for new episode.
-        
-        Returns:
-            observation: Dict with 'rgb' and 'state' keys
-            info: Dict with episode info
-        """
+        """Reset environment for new episode."""
         if seed is not None:
             self._env.seed(seed)
             np.random.seed(seed)
         
         habitat_obs = self._env.reset()
-        
         observation = self._process_observation(habitat_obs)
         
         self._episode_step = 0
@@ -242,14 +174,11 @@ class ColorSortingGymEnv(gym.Env):
     def step(
         self, action: np.ndarray
     ) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        """Execute one step using Habitat's step method."""
-        # Convert to Habitat action format  
+        """Execute one step."""
         habitat_action = self._flatten_action(action)
         
-        # Use Habitat's standard step method
         observations = self._env.step(habitat_action)
         
-        # Get measurements and metrics
         metrics = self._env.task.measurements.get_metrics()
         reward = metrics.get(self.habitat_config.habitat.task.reward_measure, 0.0)
         success = metrics.get(self.habitat_config.habitat.task.success_measure, 0)
@@ -257,46 +186,35 @@ class ColorSortingGymEnv(gym.Env):
         self._episode_step += 1
         self._episode_reward += reward
         
-        # Termination
         terminated = bool(success) and self.habitat_config.habitat.task.end_on_success
         truncated = self._episode_step >= self.max_episode_steps
         
-        # Process observation
         observation = self._process_observation(observations)
         
-        # Info dict
         info = {
             'episode_reward': self._episode_reward,
             'episode_length': self._episode_step,
         }
         info.update(metrics)
         
-        # Check if Habitat ended the episode
         if hasattr(self._env, "episode_over"):
             terminated = terminated or self._env.episode_over
         
         return observation, reward, terminated, truncated, info
-
         
     def render(self) -> Optional[np.ndarray]:
-        """
-        Render environment.
-        
-        Returns:
-            RGB array if render_mode is 'rgb_array', else None
-        """
+        """Render environment."""
         if self.render_mode == "rgb_array":
-            # Return current RGB observation
             obs = self._env.sim.get_sensor_observations()
             if "head_rgb" in obs:
                 return obs["head_rgb"].astype(np.uint8)
         return None
     
     def close(self):
-        """Close environment and clean up resources."""
+        """Close environment."""
         self._env.close()
     
     def seed(self, seed: int):
-        """Set random seed for reproducibility."""
+        """Set random seed."""
         self._env.seed(seed)
         np.random.seed(seed)

@@ -30,12 +30,24 @@ class ColorZoneSensor(Sensor):
         return spaces.Box(low=-np.inf, high=np.inf, shape=(3, 4), dtype=np.float32)
     
     def get_observation(self, observations, episode, *args, **kwargs):
-        zone_data = [
-            [-0.5, 0.8, 0.0, 0],  # Red zone
-            [0.0, 0.8, 0.0, 1],   # Green zone
-            [0.5, 0.8, 0.0, 2]    # Blue zone
-        ]
-        return np.array(zone_data, dtype=np.float32)
+        # Get zones from task if available (dynamic positions)
+        zone_data = []
+        task = episode.task if hasattr(episode, "task") else None
+        
+        if task and hasattr(task, "_color_zones"):
+            zone_names = ["red", "green", "blue"]
+            for name in zone_names:
+                if name in task._color_zones:
+                    zone = task._color_zones[name]
+                    pos = zone.get("position", [0, 0, 0])
+                    color_id = zone.get("color_id", 0)
+                    zone_data.append([pos[0], pos[1], pos[2], color_id])
+        
+        # Fallback to default if no task zones
+        while len(zone_data) < 3:
+            zone_data.append([0.0, 0.0, 0.0, -1])
+        
+        return np.array(zone_data[:3], dtype=np.float32)
 
 
 @registry.register_sensor
@@ -62,15 +74,12 @@ class ObjectColorSensor(Sensor):
         rigid_obj_mgr = self._sim.get_rigid_object_manager()
         
         for obj_handle in rigid_obj_mgr.get_object_handles():
-            if "object_" not in obj_handle:
+            if "cubeSolid" not in obj_handle and "red_cube" not in obj_handle:
                 continue
             obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
             pos = obj.translation
-            try:
-                obj_idx = int(obj_handle.split("_")[-1])
-                color_id = obj_idx % 3
-            except:
-                color_id = 0
+            # Color ID is 0 for red cube (single object task)
+            color_id = 0
             object_data.append([pos[0], pos[1], pos[2], color_id])
         
         while len(object_data) < 3:
@@ -208,22 +217,32 @@ class ColorSortingDenseReward(Measure):
         try:
             rigid_obj_mgr = self._sim.get_rigid_object_manager()
             for obj_handle in rigid_obj_mgr.get_object_handles():
-                if "object_" not in obj_handle:
+                if "cubeSolid" not in obj_handle and "red_cube" not in obj_handle:
                     continue
                 obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
                 pos = np.array(obj.translation)
-                try:
-                    obj_idx = int(obj_handle.split("_")[-1])
-                    color_id = obj_idx % 3
-                except:
-                    color_id = 0
+                # Color ID is 0 for our single-object task (red cube)
+                # For multi-object tasks, this would need task._spawned_objects index
+                color_id = 0
                 objects.append((obj_handle, pos, color_id))
         except Exception:
             pass
         return objects
     
-    def _get_zone_position(self, color_id: int) -> np.ndarray:
-        """Get zone position for given color ID."""
+    def _get_zone_position(self, color_id: int, task) -> np.ndarray:
+        """Get zone position for given color ID from task."""
+        # Try to get zone from task first (dynamic positions)
+        if hasattr(task, "_color_zones"):
+            zone_names = ["red", "green", "blue"]
+            if color_id < len(zone_names):
+                zone_name = zone_names[color_id]
+                if zone_name in task._color_zones:
+                    zone_data = task._color_zones[zone_name]
+                    pos = zone_data.get("position")
+                    if pos is not None:
+                        return np.array(pos)
+        
+        # Fallback to default positions (should not happen in normal operation)
         zones = {
             0: np.array([-0.5, 0.8, 0.0]),  # Red
             1: np.array([0.0, 0.8, 0.0]),   # Green
@@ -234,35 +253,32 @@ class ColorSortingDenseReward(Measure):
     def _is_holding_object(self, task) -> bool:
         """Check if robot is currently holding an object."""
         try:
-            agent = self._sim.articulated_agent
-            if agent is None:
-                return False
-            # Check gripper state
-            return agent.is_grasped
+            # Use grasp manager to check if object is grasped
+            if hasattr(self._sim, 'grasp_mgr'):
+                return self._sim.grasp_mgr.is_grasped
+            return False
         except Exception:
             return False
     
     def _get_held_object(self, task) -> Optional[tuple]:
         """Get the currently held object (handle, color_id) if any."""
         try:
-            agent = self._sim.articulated_agent
-            if agent is None or not agent.is_grasped:
+            # Use grasp manager to check grasped object
+            if not hasattr(self._sim, 'grasp_mgr') or not self._sim.grasp_mgr.is_grasped:
                 return None
-            # Get grasped object
-            grasped_obj_id = agent.grasped_objects_idxs
-            if grasped_obj_id is None or len(grasped_obj_id) == 0:
+            
+            # Get snapped object ID from grasp manager
+            snap_idx = self._sim.grasp_mgr.snap_idx
+            if snap_idx is None:
                 return None
-            # Find object handle
+            
+            # Find object handle by ID
             rigid_obj_mgr = self._sim.get_rigid_object_manager()
             for obj_handle in rigid_obj_mgr.get_object_handles():
-                if "object_" in obj_handle:
+                if "object_" in obj_handle or "cubeSolid" in obj_handle or "red_cube" in obj_handle:
                     obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
-                    if obj.object_id in grasped_obj_id:
-                        try:
-                            obj_idx = int(obj_handle.split("_")[-1])
-                            color_id = obj_idx % 3
-                        except:
-                            color_id = 0
+                    if obj.object_id == snap_idx:
+                        color_id = 0
                         return (obj_handle, color_id)
         except Exception:
             pass
@@ -307,7 +323,7 @@ class ColorSortingDenseReward(Measure):
         # === PHASE 3: TRANSPORT (when holding) ===
         if is_holding and held_obj is not None:
             obj_handle, color_id = held_obj
-            target_zone = self._get_zone_position(color_id)
+            target_zone = self._get_zone_position(color_id, task)
             
             # Use EE position as proxy for object position when held
             if ee_pos is not None:
@@ -320,27 +336,26 @@ class ColorSortingDenseReward(Measure):
                 self._prev_dist_to_target = dist_to_zone
         
         # === PHASE 4: PLACE (object in correct zone) ===
+        # Track which objects were just placed this step
+        just_placed_objects = set()
         for obj_handle, is_correct in placements.items():
             if is_correct and obj_handle not in self._objects_placed:
                 reward += self._place_reward
                 self._objects_placed.add(obj_handle)
+                just_placed_objects.add(obj_handle)
                 self._prev_dist_to_target = None  # Reset transport tracking
         
-        # === PHASE 5: DROP PENALTY (dropped without placing) ===
+        # === PHASE 5: DROP PENALTY (dropped without correct placement) ===
         if self._prev_holding and not is_holding:
-            if held_obj is None:
-                # Check if we just placed correctly
-                just_placed = False
-                for obj_handle in self._objects_placed:
-                    if obj_handle not in self._objects_placed:
-                        just_placed = True
-                        break
-                if not just_placed:
-                    reward += self._drop_penalty
+            # Robot released object - check if it was placed correctly
+            if len(just_placed_objects) == 0:
+                # No objects were just placed correctly, so this is a bad drop
+                reward += self._drop_penalty
         
         # === PHASE 6: COMPLETION BONUS ===
-        if placements and all(placements.values()):
-            if len(self._objects_placed) == len(placements):
+        # Give bonus when all objects are correctly placed
+        if placements and len(placements) > 0:
+            if all(placements.values()) and len(self._objects_placed) == len(placements):
                 reward += self._completion_bonus
         
         # Update state for next step
