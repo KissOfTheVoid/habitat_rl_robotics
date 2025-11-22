@@ -1,93 +1,74 @@
-# @package _global_
-
 defaults:
-  - /habitat: habitat_config_base
-  - /habitat/simulator: rearrange_sim
-  - /habitat/simulator/sensor_setups@habitat.simulator.agents.main_agent: rgbd_head_agent
-  - /habitat/simulator/agents@habitat.simulator.agents.main_agent: fetch_suction
-  - /habitat/task: task_config_base
-  - /habitat/task/rearrange/actions: fetch_suction_arm_base
-  - /habitat/task/measurements:
-    - articulated_agent_force
-    - articulated_agent_colls
-    - force_terminate
-    - end_effector_to_rest_distance
-    - num_steps
-  - /habitat/task/lab_sensors:
-    - joint_sensor
-    - is_holding_sensor
-    - end_effector_sensor
-  - /habitat/dataset/rearrangement: replica_cad
-  - _self_
-
+- /habitat: habitat_config_base
+- /habitat/simulator: rearrange_sim
+- /habitat/simulator/sensor_setups@habitat.simulator.agents.main_agent: rgbd_head_agent
+- /habitat/simulator/agents@habitat.simulator.agents.main_agent: fetch_suction
+- /habitat/task: task_config_base
+- /habitat/task/rearrange/actions: fetch_suction_arm_base
+- /habitat/task/measurements:
+  - articulated_agent_force
+  - articulated_agent_colls
+  - force_terminate
+  - end_effector_to_rest_distance
+  - num_steps
+- /habitat/task/lab_sensors:
+  - joint_sensor
+  - is_holding_sensor
+  - end_effector_sensor
+- /habitat/dataset/rearrangement: replica_cad
+- _self_
 habitat:
   seed: 42
-  
   gym:
     obs_keys:
-      - head_rgb
-      - joint
-      - is_holding
-    
+    - head_rgb
+    - joint
+    - is_holding
   environment:
     max_episode_steps: 500
-  
   task:
     type: ColorSortingTask-v0
-    # Using dense reward for better learning signal
-    reward_measure: "color_sorting_dense_reward"
-    success_measure: "color_sorting_success"
+    reward_measure: color_sorting_dense_reward
+    success_measure: color_sorting_success
     success_reward: 100.0
     slack_reward: -0.001
-    end_on_success: False
-    
-    # Measurements
+    end_on_success: false
     measurements:
       color_sorting_reward:
         type: ColorSortingReward
-      
       color_sorting_dense_reward:
         type: ColorSortingDenseReward
-      
       color_sorting_success:
         type: ColorSortingSuccess
-      
       num_objects_correctly_placed:
         type: NumObjectsCorrectlyPlaced
-      
       force_terminate:
         max_accum_force: 10000.0
         max_instant_force: 10000.0
-    
-    # Lab sensors
     lab_sensors:
       object_color_sensor:
         type: ObjectColorSensor
-      
       color_zone_sensor:
         type: ColorZoneSensor
-      
       relative_resting_position:
         type: RelativeRestingPositionSensor
-  
+      normalized_task_state:
+        type: NormalizedTaskStateSensor
   simulator:
     type: RearrangeSim-v0
     seed: 42
-    create_renderer: True
-    requires_textures: True
-    auto_sleep: False
-    
+    create_renderer: true
+    requires_textures: true
+    auto_sleep: false
     agents:
       main_agent:
         articulated_agent_urdf: /home/iskopyl/habitat_data/robots/hab_fetch/robots/hab_suction.urdf
-    
     habitat_sim_v0:
-      enable_physics: True
-      leave_context_with_background_renderer: False
-      enable_hbao: False
-      enable_gfx_replay_save: False
+      enable_physics: true
+      leave_context_with_background_renderer: false
+      enable_hbao: false
+      enable_gfx_replay_save: false
       gpu_device_id: 0
-  
   dataset:
     type: RearrangeDataset-v0
     data_path: /home/iskopyl/habitat_rl_sorting/data/datasets/color_sorting.json.gz

@@ -30,24 +30,12 @@ class ColorZoneSensor(Sensor):
         return spaces.Box(low=-np.inf, high=np.inf, shape=(3, 4), dtype=np.float32)
     
     def get_observation(self, observations, episode, *args, **kwargs):
-        # Get zones from task if available (dynamic positions)
-        zone_data = []
-        task = episode.task if hasattr(episode, "task") else None
-        
-        if task and hasattr(task, "_color_zones"):
-            zone_names = ["red", "green", "blue"]
-            for name in zone_names:
-                if name in task._color_zones:
-                    zone = task._color_zones[name]
-                    pos = zone.get("position", [0, 0, 0])
-                    color_id = zone.get("color_id", 0)
-                    zone_data.append([pos[0], pos[1], pos[2], color_id])
-        
-        # Fallback to default if no task zones
-        while len(zone_data) < 3:
-            zone_data.append([0.0, 0.0, 0.0, -1])
-        
-        return np.array(zone_data[:3], dtype=np.float32)
+        zone_data = [
+            [-0.5, 0.8, 0.0, 0],  # Red zone
+            [0.0, 0.8, 0.0, 1],   # Green zone
+            [0.5, 0.8, 0.0, 2]    # Blue zone
+        ]
+        return np.array(zone_data, dtype=np.float32)
 
 
 @registry.register_sensor
@@ -78,8 +66,11 @@ class ObjectColorSensor(Sensor):
                 continue
             obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
             pos = obj.translation
-            # Color ID is 0 for red cube (single object task)
-            color_id = 0
+            try:
+                obj_idx = int(obj_handle.split("_")[-1])
+                color_id = obj_idx % 3
+            except:
+                color_id = 0
             object_data.append([pos[0], pos[1], pos[2], color_id])
         
         while len(object_data) < 3:
@@ -172,12 +163,12 @@ class ColorSortingDenseReward(Measure):
         super().__init__()
         
         # Reward coefficients (can be overridden in config)
-        self._dist_reward_scale = config.get("dist_reward_scale", 10.0)
+        self._dist_reward_scale = config.get("dist_reward_scale", 1.0)
         self._pick_reward = config.get("pick_reward", 10.0)
         self._place_reward = config.get("place_reward", 50.0)
-        self._drop_penalty = config.get("drop_penalty", -20.0)
+        self._drop_penalty = config.get("drop_penalty", -5.0)
         self._wrong_zone_penalty = config.get("wrong_zone_penalty", -10.0)
-        self._time_penalty = config.get("time_penalty", -0.01)
+        self._time_penalty = config.get("time_penalty", -0.001)
         self._completion_bonus = config.get("completion_bonus", 100.0)
         self._success_distance = config.get("success_distance", 0.1)
         
@@ -221,28 +212,18 @@ class ColorSortingDenseReward(Measure):
                     continue
                 obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
                 pos = np.array(obj.translation)
-                # Color ID is 0 for our single-object task (red cube)
-                # For multi-object tasks, this would need task._spawned_objects index
-                color_id = 0
+                try:
+                    obj_idx = int(obj_handle.split("_")[-1])
+                    color_id = obj_idx % 3
+                except:
+                    color_id = 0
                 objects.append((obj_handle, pos, color_id))
         except Exception:
             pass
         return objects
     
-    def _get_zone_position(self, color_id: int, task) -> np.ndarray:
-        """Get zone position for given color ID from task."""
-        # Try to get zone from task first (dynamic positions)
-        if hasattr(task, "_color_zones"):
-            zone_names = ["red", "green", "blue"]
-            if color_id < len(zone_names):
-                zone_name = zone_names[color_id]
-                if zone_name in task._color_zones:
-                    zone_data = task._color_zones[zone_name]
-                    pos = zone_data.get("position")
-                    if pos is not None:
-                        return np.array(pos)
-        
-        # Fallback to default positions (should not happen in normal operation)
+    def _get_zone_position(self, color_id: int) -> np.ndarray:
+        """Get zone position for given color ID."""
         zones = {
             0: np.array([-0.5, 0.8, 0.0]),  # Red
             1: np.array([0.0, 0.8, 0.0]),   # Green
@@ -323,7 +304,7 @@ class ColorSortingDenseReward(Measure):
         # === PHASE 3: TRANSPORT (when holding) ===
         if is_holding and held_obj is not None:
             obj_handle, color_id = held_obj
-            target_zone = self._get_zone_position(color_id, task)
+            target_zone = self._get_zone_position(color_id)
             
             # Use EE position as proxy for object position when held
             if ee_pos is not None:
@@ -336,26 +317,27 @@ class ColorSortingDenseReward(Measure):
                 self._prev_dist_to_target = dist_to_zone
         
         # === PHASE 4: PLACE (object in correct zone) ===
-        # Track which objects were just placed this step
-        just_placed_objects = set()
         for obj_handle, is_correct in placements.items():
             if is_correct and obj_handle not in self._objects_placed:
                 reward += self._place_reward
                 self._objects_placed.add(obj_handle)
-                just_placed_objects.add(obj_handle)
                 self._prev_dist_to_target = None  # Reset transport tracking
         
-        # === PHASE 5: DROP PENALTY (dropped without correct placement) ===
+        # === PHASE 5: DROP PENALTY (dropped without placing) ===
         if self._prev_holding and not is_holding:
-            # Robot released object - check if it was placed correctly
-            if len(just_placed_objects) == 0:
-                # No objects were just placed correctly, so this is a bad drop
-                reward += self._drop_penalty
+            if held_obj is None:
+                # Check if we just placed correctly
+                just_placed = False
+                for obj_handle in self._objects_placed:
+                    if obj_handle not in self._objects_placed:
+                        just_placed = True
+                        break
+                if not just_placed:
+                    reward += self._drop_penalty
         
         # === PHASE 6: COMPLETION BONUS ===
-        # Give bonus when all objects are correctly placed
-        if placements and len(placements) > 0:
-            if all(placements.values()) and len(self._objects_placed) == len(placements):
+        if placements and all(placements.values()):
+            if len(self._objects_placed) == len(placements):
                 reward += self._completion_bonus
         
         # Update state for next step
@@ -386,92 +368,3 @@ class NumObjectsCorrectlyPlaced(Measure):
             self._metric = sum(placements.values()) if placements else 0
         else:
             self._metric = 0
-
-
-@registry.register_sensor
-class NormalizedTaskStateSensor(Sensor):
-    """
-    Normalized sensor providing compact task state.
-    Returns robot-relative positions normalized to [-1, 1] range.
-    
-    Output shape: (9,) containing:
-    - [0:3]: Object position relative to EE (normalized)
-    - [3:6]: Target zone position relative to robot base (normalized)
-    - [6:9]: EE position relative to robot base (normalized)
-    
-    This replaces the redundant 24-dim observation from ColorZoneSensor + ObjectColorSensor.
-    """
-    cls_uuid: str = "normalized_task_state"
-    
-    def __init__(self, sim: Simulator, config, *args, **kwargs):
-        self._sim = sim
-        self._normalization_range = config.get("normalization_range", 2.0)  # ±2m workspace
-        super().__init__(config=config)
-    
-    def _get_uuid(self, *args, **kwargs):
-        return self.cls_uuid
-    
-    def _get_sensor_type(self, *args, **kwargs):
-        return SensorTypes.TENSOR
-    
-    def _get_observation_space(self, *args, **kwargs):
-        from gym import spaces
-        return spaces.Box(low=-1.0, high=1.0, shape=(9,), dtype=np.float32)
-    
-    def _normalize_position(self, pos: np.ndarray, reference: np.ndarray) -> np.ndarray:
-        """Normalize position relative to reference to [-1, 1] range."""
-        relative = pos - reference
-        normalized = relative / self._normalization_range
-        return np.clip(normalized, -1.0, 1.0)
-    
-    def get_observation(self, observations, episode, *args, **kwargs):
-        # Default observation (all zeros if something fails)
-        obs = np.zeros(9, dtype=np.float32)
-        
-        try:
-            agent = self._sim.articulated_agent
-            if agent is None:
-                return obs
-            
-            # Get robot positions
-            robot_base = np.array(agent.base_pos)
-            ee_transform = agent.ee_transform()
-            ee_pos = np.array(ee_transform.translation)
-            
-            # Get task zones
-            task = episode.task if hasattr(episode, "task") else None
-            target_zone_pos = np.array([0.0, 0.8, 0.0])  # Default
-            
-            if task and hasattr(task, "_color_zones"):
-                # For single-object task, use red zone (color_id=0)
-                if "red" in task._color_zones:
-                    zone_data = task._color_zones["red"]
-                    zone_pos = zone_data.get("position")
-                    if zone_pos is not None:
-                        target_zone_pos = np.array(zone_pos)
-            
-            # Get object position (first red_cube found)
-            rigid_obj_mgr = self._sim.get_rigid_object_manager()
-            object_pos = ee_pos.copy()  # Default to EE if no object
-            
-            for obj_handle in rigid_obj_mgr.get_object_handles():
-                if "red_cube" in obj_handle or "cubeSolid" in obj_handle:
-                    obj = rigid_obj_mgr.get_object_by_handle(obj_handle)
-                    object_pos = np.array(obj.translation)
-                    break  # Use first object found
-            
-            # Normalize observations
-            # [0:3] Object relative to EE
-            obs[0:3] = self._normalize_position(object_pos, ee_pos)
-            
-            # [3:6] Target zone relative to robot base
-            obs[3:6] = self._normalize_position(target_zone_pos, robot_base)
-            
-            # [6:9] EE relative to robot base
-            obs[6:9] = self._normalize_position(ee_pos, robot_base)
-            
-        except Exception as e:
-            # Fail gracefully - return zeros
-            pass
-        
-        return obs
