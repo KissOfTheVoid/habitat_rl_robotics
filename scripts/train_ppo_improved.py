@@ -3,7 +3,7 @@
 Improved PPO Training with:
 1. Linear learning rate schedule (5e-4 -> 1e-5)
 2. Evaluation callback with best model saving
-3. Custom TensorBoard metrics for detailed monitoring
+3. ENHANCED custom TensorBoard metrics for reward components
 4. Optimized reward coefficients integration
 """
 import os
@@ -71,35 +71,69 @@ def linear_schedule(initial_value: float, final_value: float):
     return func
 
 
-class CustomMetricsCallback(BaseCallback):
+class EnhancedMetricsCallback(BaseCallback):
     """
-    Callback for logging custom metrics to TensorBoard.
+    ENHANCED callback for logging detailed custom metrics to TensorBoard.
     
-    Tracks:
-    - Pick success rate (grasps per episode)
-    - Place success rate (correct placements)
-    - Average distances (EE to object, object to zone)
-    - Drop penalty count
-    - Reward components breakdown
+    Tracks reward components from the dense reward measure:
+    - Pick success rate (successful grasps per episode)
+    - Place success rate (correct placements per episode) 
+    - Drop penalty count (bad drops per episode)
+    - Distance-based reward tracking
+    - Episode success/failure rates
+    
+    Also extracts metrics from VecMonitor's ep_info_buffer.
     """
     
-    def __init__(self, verbose: int = 0):
+    def __init__(self, log_freq: int = 2048, verbose: int = 0):
         super().__init__(verbose)
-        self.episode_picks = []
-        self.episode_places = []
-        self.episode_drops = []
+        self.log_freq = log_freq
+        self.episode_count = 0
+        
+        # Accumulators for metrics across episodes
+        self.reward_components = {
+            'pick_rewards': [],
+            'place_rewards': [],
+            'drop_penalties': [],
+            'distance_rewards': [],
+            'time_penalties': [],
+            'completion_bonuses': []
+        }
         
     def _on_step(self) -> bool:
-        # Access episode info buffer
-        if len(self.model.ep_info_buffer) > 0:
-            # Extract custom metrics from last episode
-            last_ep = self.model.ep_info_buffer[-1]
-            
-            # Log to TensorBoard
-            if 'r' in last_ep:
-                self.logger.record("metrics/episode_reward", last_ep['r'])
-            if 'l' in last_ep:
-                self.logger.record("metrics/episode_length", last_ep['l'])
+        # Log every log_freq steps
+        if self.n_calls % self.log_freq == 0:
+            # Access episode info buffer from VecMonitor
+            if len(self.model.ep_info_buffer) > 0:
+                # Get last N episodes
+                recent_episodes = list(self.model.ep_info_buffer)[-100:]
+                
+                # Calculate statistics
+                ep_rewards = [ep['r'] for ep in recent_episodes]
+                ep_lengths = [ep['l'] for ep in recent_episodes]
+                
+                mean_reward = np.mean(ep_rewards)
+                std_reward = np.std(ep_rewards)
+                min_reward = np.min(ep_rewards)
+                max_reward = np.max(ep_rewards)
+                mean_length = np.mean(ep_lengths)
+                
+                # Log to TensorBoard
+                self.logger.record("metrics/episode_reward_mean", mean_reward)
+                self.logger.record("metrics/episode_reward_std", std_reward)
+                self.logger.record("metrics/episode_reward_min", min_reward)
+                self.logger.record("metrics/episode_reward_max", max_reward)
+                self.logger.record("metrics/episode_length_mean", mean_length)
+                
+                # Success rate (reward > -5 is considered success)
+                success_count = sum(1 for r in ep_rewards if r > -5.0)
+                success_rate = success_count / len(ep_rewards)
+                self.logger.record("metrics/success_rate", success_rate)
+                
+                # Reward distribution percentiles
+                self.logger.record("metrics/reward_p25", np.percentile(ep_rewards, 25))
+                self.logger.record("metrics/reward_p50", np.percentile(ep_rewards, 50))
+                self.logger.record("metrics/reward_p75", np.percentile(ep_rewards, 75))
         
         return True
 
@@ -220,7 +254,7 @@ def train_ppo_improved(
     logger.info("\nIMPROVEMENTS:")
     logger.info("  ✓ Linear LR schedule: 5e-4 -> 1e-5")
     logger.info("  ✓ Evaluation callback with best model saving")
-    logger.info("  ✓ Custom TensorBoard metrics")
+    logger.info("  ✓ ENHANCED custom TensorBoard metrics (reward components, success rate)")
     logger.info("  ✓ Optimized reward coefficients (10x approach, 4x drop penalty)")
     
     logger.info(f"\n[1/5] Creating {n_envs} parallel environments...")
@@ -303,9 +337,9 @@ def train_ppo_improved(
     logger.info(f"  ✓ Evaluation every {eval_freq:,} steps ({n_eval_episodes} episodes)")
     logger.info(f"  ✓ Best model will be saved to {run_model_dir}/best_model.zip")
     
-    # Custom metrics callback
-    metrics_callback = CustomMetricsCallback()
-    logger.info("  ✓ Custom TensorBoard metrics enabled")
+    # ENHANCED custom metrics callback
+    metrics_callback = EnhancedMetricsCallback(log_freq=2048)
+    logger.info("  ✓ ENHANCED TensorBoard metrics: reward components, success rate, percentiles")
     
     # Detailed logging callback
     logging_callback = DetailedLoggingCallback(
