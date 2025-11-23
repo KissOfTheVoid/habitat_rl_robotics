@@ -281,7 +281,7 @@ def train_ppo_improved(
         "gamma": 0.99,
         "gae_lambda": 0.95,
         "clip_range": 0.2,
-        "ent_coef": 0.005,
+        "ent_coef": 0.02,
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
     }
@@ -299,6 +299,9 @@ def train_ppo_improved(
         logger.info(f"Loading model from {resume_from}...")
         model = PPO.load(resume_from, env=env, device="cuda", tensorboard_log=run_log_dir)
         model._total_timesteps = total_timesteps
+        # Update hyperparameters with new values
+        model.ent_coef = 0.02  # Увеличено для борьбы с низкой entropy
+        logger.info(f"Updated ent_coef to {model.ent_coef} (was lower before)")
     else:
         model = PPO(
             "MultiInputPolicy",
