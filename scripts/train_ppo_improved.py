@@ -252,7 +252,7 @@ def train_ppo_improved(
     logger.info(f"Log directory: {run_log_dir}")
     logger.info(f"Model directory: {run_model_dir}")
     logger.info("\nIMPROVEMENTS:")
-    logger.info("  ✓ Linear LR schedule: 5e-4 -> 1e-5")
+    logger.info("  ✓ Linear LR schedule: 3e-4 -> 1e-5 (BALANCED)")
     logger.info("  ✓ Evaluation callback with best model saving")
     logger.info("  ✓ ENHANCED custom TensorBoard metrics (reward components, success rate)")
     logger.info("  ✓ Optimized reward coefficients (10x approach, 4x drop penalty)")
@@ -271,7 +271,7 @@ def train_ppo_improved(
     logger.info("Evaluation environment created")
     
     # IMPROVED HYPERPARAMETERS
-    lr_schedule = linear_schedule(5e-4, 1e-5)
+    lr_schedule = linear_schedule(3e-4, 1e-5)
     
     ppo_params = {
         "learning_rate": lr_schedule,  # Linear schedule instead of constant

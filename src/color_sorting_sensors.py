@@ -172,12 +172,12 @@ class ColorSortingDenseReward(Measure):
         super().__init__()
         
         # Reward coefficients (can be overridden in config)
-        self._dist_reward_scale = config.get("dist_reward_scale", 10.0)
+        self._dist_reward_scale = config.get("dist_reward_scale", 2.0)
         self._pick_reward = config.get("pick_reward", 10.0)
         self._place_reward = config.get("place_reward", 50.0)
-        self._drop_penalty = config.get("drop_penalty", -20.0)
+        self._drop_penalty = config.get("drop_penalty", -5.0)
         self._wrong_zone_penalty = config.get("wrong_zone_penalty", -10.0)
-        self._time_penalty = config.get("time_penalty", -0.01)
+        self._time_penalty = config.get("time_penalty", -0.001)
         self._completion_bonus = config.get("completion_bonus", 100.0)
         self._success_distance = config.get("success_distance", 0.1)
         
